@@ -94,11 +94,7 @@ jobs:
 
           echo ""
           echo "=== 验证关键配置 ==="
-          grep -E \
-            "CONFIG_BRCMFMAC|CONFIG_BT_HCIUART_BCM|CONFIG_STMMAC_ETH|\
-CONFIG_DWMAC_ROCKCHIP|CONFIG_USB_DWC3|CONFIG_MMC_DW_ROCKCHIP|\
-CONFIG_SPI_ROCKCHIP|CONFIG_LEDS_GPIO|CONFIG_BRCMFMAC_SDIO" \
-            .config || true
+          grep -E "CONFIG_BRCMFMAC|CONFIG_BT_HCIUART_BCM|CONFIG_STMMAC_ETH|CONFIG_DWMAC_ROCKCHIP|CONFIG_USB_DWC3|CONFIG_MMC_DW_ROCKCHIP|CONFIG_SPI_ROCKCHIP|CONFIG_LEDS_GPIO|CONFIG_BRCMFMAC_SDIO" .config || true
 
       # ── 6. 编译内核 ───────────────────────────────────────────────────
       - name: Compile kernel
@@ -106,9 +102,8 @@ CONFIG_SPI_ROCKCHIP|CONFIG_LEDS_GPIO|CONFIG_BRCMFMAC_SDIO" \
         run: |
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
                -j$(nproc) \
-               Image modules dtbs \
-               2>&1 | tee /tmp/build.log
-          echo "Exit code: ${PIPESTATUS[0]}"
+               Image modules dtbs
+          echo "Compile finished."
 
       # ── 7. 安装模块 ───────────────────────────────────────────────────
       - name: Install kernel modules
