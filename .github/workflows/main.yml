@@ -2,9 +2,6 @@ name: Decompile DTB to DTS
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - '**.dtb'
 
 jobs:
   decompile:
