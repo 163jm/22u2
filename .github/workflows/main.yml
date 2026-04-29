@@ -1,0 +1,90 @@
+name: Decompile DTB to DTS
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**.dtb'
+
+jobs:
+  decompile:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install device-tree-compiler
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y device-tree-compiler
+          dtc --version
+
+      - name: Decompile all DTB files to DTS
+        run: |
+          mkdir -p output-dts
+
+          # 查找仓库里所有 .dtb 文件
+          DTB_FILES=$(find . -name "*.dtb" -not -path "./.git/*")
+
+          if [ -z "$DTB_FILES" ]; then
+            echo "::error::No .dtb files found in repository"
+            exit 1
+          fi
+
+          echo "Found DTB files:"
+          echo "$DTB_FILES"
+
+          for dtb in $DTB_FILES; do
+            filename=$(basename "$dtb" .dtb)
+            echo "--------------------------------------------"
+            echo "Decompiling: $dtb -> output-dts/${filename}.dts"
+
+            dtc \
+              -I dtb \
+              -O dts \
+              -o "output-dts/${filename}.dts" \
+              "$dtb" \
+              2>&1
+
+            if [ $? -eq 0 ]; then
+              echo "OK: ${filename}.dts ($(wc -l < output-dts/${filename}.dts) lines)"
+            else
+              echo "::error::Failed to decompile $dtb"
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "=============================="
+          echo "All decompiled DTS files:"
+          ls -lh output-dts/
+
+      - name: Show DTS content preview
+        run: |
+          for f in output-dts/*.dts; do
+            echo "=============================="
+            echo "FILE: $f"
+            echo "=============================="
+            head -60 "$f"
+            echo "... ($(wc -l < $f) lines total)"
+            echo ""
+          done
+
+      - name: Upload DTS as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-dts
+          path: output-dts/
+          retention-days: 30
+
+      - name: Upload DTS to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dts-${{ github.run_number }}
+          name: "Decompiled DTS - Run #${{ github.run_number }}"
+          body: |
+            Decompiled DTS files from DTB.
+            Source DTB committed at: ${{ github.sha }}
+          files: output-dts/*.dts
+          token: ${{ secrets.GITHUB_TOKEN }}
