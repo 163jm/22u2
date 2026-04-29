@@ -1,0 +1,185 @@
+name: Build Mainline Kernel for Panther X2
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_tag:
+        description: '内核版本 tag，例如 v6.9.4 / v6.6.87 / v6.12.25'
+        required: false
+        default: 'v6.9.4'
+      kernel_sign:
+        description: '内核签名后缀'
+        required: false
+        default: '-panther-x2'
+
+env:
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+  KERNEL_TAG: ${{ github.event.inputs.kernel_tag || 'v6.9.4' }}
+  KERNEL_SIGN: ${{ github.event.inputs.kernel_sign || '-panther-x2' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+
+      # ── 1. 检出本仓库（含 DTS 和 config）──────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: my-repo
+
+      # ── 2. 安装依赖 ────────────────────────────────────────────────────
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            make bc flex bison \
+            libssl-dev libelf-dev \
+            python3 python3-distutils \
+            device-tree-compiler \
+            git wget curl xz-utils \
+            kmod cpio
+
+      # ── 3. 拉取主线内核（shallow，只取指定 tag）──────────────────────
+      - name: Clone mainline kernel
+        run: |
+          echo "Cloning kernel ${{ env.KERNEL_TAG }} ..."
+          git clone \
+            --depth=1 \
+            --branch ${{ env.KERNEL_TAG }} \
+            https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+            linux
+          echo "Kernel version: $(cat linux/Makefile | head -5)"
+
+      # ── 4. 注入 Panther X2 DTS ────────────────────────────────────────
+      - name: Inject Panther X2 DTS
+        run: |
+          DTS_SRC="my-repo/dts/rk3566-panther-x2.dts"
+          DTS_DST="linux/arch/arm64/boot/dts/rockchip/rk3566-panther-x2.dts"
+          MK="linux/arch/arm64/boot/dts/rockchip/Makefile"
+
+          cp "$DTS_SRC" "$DTS_DST"
+          echo "DTS injected: $DTS_DST"
+
+          # 如果 Makefile 里还没有这一行，就追加
+          if ! grep -q "rk3566-panther-x2.dtb" "$MK"; then
+            # 插在 rk3566-roc-pc.dtb 后面（有就跟着走；没有就追加到文件末尾）
+            if grep -q "rk3566-roc-pc.dtb" "$MK"; then
+              sed -i '/rk3566-roc-pc\.dtb/a dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-panther-x2.dtb' "$MK"
+            else
+              echo 'dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-panther-x2.dtb' >> "$MK"
+            fi
+          fi
+
+          echo "=== Makefile lines for panther ==="
+          grep panther "$MK"
+
+      # ── 5. 生成内核配置 ───────────────────────────────────────────────
+      - name: Configure kernel
+        working-directory: linux
+        run: |
+          # 以 rockchip 通用 defconfig 为基础
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- rockchip_defconfig
+
+          # 追加 Panther X2 专用配置片段
+          ./scripts/kconfig/merge_config.sh \
+            -m .config \
+            ../my-repo/kernel-config/panther-x2.fragment
+
+          # 让所有新增选项用默认值，无需交互
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+
+          echo ""
+          echo "=== 验证关键配置 ==="
+          grep -E \
+            "CONFIG_BRCMFMAC|CONFIG_BT_HCIUART_BCM|CONFIG_STMMAC_ETH|\
+CONFIG_DWMAC_ROCKCHIP|CONFIG_USB_DWC3|CONFIG_MMC_DW_ROCKCHIP|\
+CONFIG_SPI_ROCKCHIP|CONFIG_LEDS_GPIO|CONFIG_BRCMFMAC_SDIO" \
+            .config || true
+
+      # ── 6. 编译内核 ───────────────────────────────────────────────────
+      - name: Compile kernel
+        working-directory: linux
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+               -j$(nproc) \
+               Image modules dtbs \
+               2>&1 | tee /tmp/build.log
+          echo "Exit code: ${PIPESTATUS[0]}"
+
+      # ── 7. 安装模块 ───────────────────────────────────────────────────
+      - name: Install kernel modules
+        working-directory: linux
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+               INSTALL_MOD_PATH=../output/modules \
+               INSTALL_MOD_STRIP=1 \
+               modules_install
+
+      # ── 8. 打包产物 ───────────────────────────────────────────────────
+      - name: Package artifacts
+        run: |
+          # 读取内核版本字符串
+          KVER=$(make -C linux ARCH=arm64 -s kernelrelease 2>/dev/null)
+          KVER_FULL="${KVER}${{ env.KERNEL_SIGN }}"
+          echo "KVER=${KVER_FULL}" >> $GITHUB_ENV
+          echo "Kernel version string: ${KVER_FULL}"
+
+          mkdir -p output/boot output/dtb output/modules
+
+          # 内核镜像
+          cp linux/arch/arm64/boot/Image output/boot/Image
+
+          # DTB
+          cp linux/arch/arm64/boot/dts/rockchip/rk3566-panther-x2.dtb \
+             output/dtb/
+
+          # 打包
+          cd output
+          tar -czf boot-${KVER_FULL}.tar.gz   boot/
+          tar -czf dtb-${KVER_FULL}.tar.gz    dtb/
+          tar -czf modules-${KVER_FULL}.tar.gz modules/
+
+          ls -lh *.tar.gz
+          sha256sum *.tar.gz > sha256sums
+          echo "Packaging done."
+
+      # ── 9. 上传 Artifacts（每次构建都能下载，无需 Release）────────────
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ env.KVER }}-${{ github.run_number }}
+          path: |
+            output/*.tar.gz
+            output/sha256sums
+          retention-days: 30
+
+      # ── 10. 发布到 Release（可选，Tag 推送时自动触发）────────────────
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Kernel ${{ env.KVER }} for Panther X2"
+          body: |
+            ## Panther X2 Mainline Kernel
+
+            - **内核版本**: ${{ env.KERNEL_TAG }}
+            - **构建签名**: ${{ env.KERNEL_SIGN }}
+            - **DTS 来源**: ophub/amlogic-s9xxx-armbian (反编译自官方 DTB)
+
+            ### 包含文件
+            | 文件 | 说明 |
+            |------|------|
+            | `boot-*.tar.gz` | 内核镜像 `Image` |
+            | `dtb-*.tar.gz` | `rk3566-panther-x2.dtb` |
+            | `modules-*.tar.gz` | 内核模块 `.ko` 文件 |
+
+            ### 安装方式
+            解压到设备对应目录，替换 `/boot/Image`、`/boot/dtb/`、`/lib/modules/` 后重启。
+          files: |
+            output/*.tar.gz
+            output/sha256sums
+          token: ${{ secrets.GITHUB_TOKEN }}
